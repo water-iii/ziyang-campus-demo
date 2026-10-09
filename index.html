@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>午点通 · 校园集运演示</title>
+  <meta name="description" content="校园预约外卖与城区集运业务演示，全部使用模拟数据，不包含真实交易。">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">午</div><div><strong>午点通</strong><small>Campus Lunch Shuttle</small></div></div>
+      <div class="side-tag"><span class="tag-dot"></span> INTERACTIVE DEMO · v0.1</div>
+      <div class="side-section-label">工作空间</div>
+      <nav id="app-nav" aria-label="演示角色切换"></nav>
+      <div class="side-bottom"><div class="side-note"><strong>一班午餐，完整交付。</strong><span>梅西 · 达高 → 资阳环境科技职业学院</span></div><p>所有店铺、订单、费用、时间仅为模拟。交接点未经校方确认。</p></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="topbar-left"><div class="crumb">午点通 / <span id="top-section">运营总览</span></div><div class="demo-pill"><i></i> 模拟演示环境</div></div>
+        <div class="topbar-right"><span class="date-info">B001 · 11:30 固定发车</span><button class="btn btn-ghost btn-sm" data-action="reset" title="恢复30笔示例订单">↺ 重置演示</button></div>
+      </header>
+      <main class="main" id="app-main" aria-live="polite"></main>
+      <footer class="footer">午点通 · 资阳校园集运演示版　/　无真实商户、无真实支付、无学生个人数据 · 状态仅保存在当前浏览器</footer>
+    </div>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="engine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
