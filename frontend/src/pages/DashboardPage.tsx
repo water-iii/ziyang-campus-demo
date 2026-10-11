@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { Button, Chip, PageHeading, StatusChip, dateTime, money, time } from '../components'
 import type { PageProps } from '../App'
-import type { AuditLog, PickupRoute } from '../types'
+import type { AuditLog, DemoClock, PickupRoute, RouteStop } from '../types'
 
 const statusOrder = ['open', 'cutoff', 'collecting', 'transit', 'campus', 'delivering', 'finished'] as const
 const steps = [
@@ -18,16 +18,28 @@ const steps = [
 export function DashboardPage({ summary, merchants, revision, refresh, notify, navigate }: PageProps) {
   const [route, setRoute] = useState<PickupRoute | null>(null)
   const [logs, setLogs] = useState<AuditLog[]>([])
+  const [clock, setClock] = useState<DemoClock | null>(null)
   const [busy, setBusy] = useState(false)
+  const [busyStop, setBusyStop] = useState('')
   const stage = statusOrder.indexOf(summary.batch.status)
 
-  useEffect(() => {
-    void Promise.all([api.getRoute(), api.getAuditLogs()])
-      .then(([nextRoute, nextLogs]) => {
+  async function loadOperations() {
+    try {
+      const [nextRoute, nextLogs, nextClock] = await Promise.all([
+        api.getRoute(),
+        api.getAuditLogs(),
+        api.getDemoClock(),
+      ])
         setRoute(nextRoute)
         setLogs(nextLogs)
-      })
-      .catch((error: Error) => notify(error.message, true))
+      setClock(nextClock)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '运营数据加载失败。', true)
+    }
+  }
+
+  useEffect(() => {
+    void loadOperations()
   }, [revision, notify])
 
   async function cutoff() {
@@ -40,6 +52,50 @@ export function DashboardPage({ summary, merchants, revision, refresh, notify, n
       notify(error instanceof Error ? error.message : '截单失败。', true)
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function simulateToDeadline(stop: RouteStop) {
+    setBusyStop(`clock-${stop.id}`)
+    try {
+      await api.setDemoClock(stop.latest_handoff_at)
+      await refresh()
+      await loadOperations()
+      notify(`模拟业务时间已推进到 ${stop.id} 最晚交接时间。`)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '模拟时间设置失败。', true)
+    } finally {
+      setBusyStop('')
+    }
+  }
+
+  async function resetClock() {
+    setBusyStop('clock-reset')
+    try {
+      await api.resetDemoClock()
+      await refresh()
+      await loadOperations()
+      notify('已恢复服务器真实时间。')
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '恢复真实时间失败。', true)
+    } finally {
+      setBusyStop('')
+    }
+  }
+
+  async function authorizeEarlyClose(stop: RouteStop) {
+    const reason = window.prompt('请输入运营提前关闭交接的原因（会写入审计）：')?.trim()
+    if (!reason) return
+    setBusyStop(`authorize-${stop.id}`)
+    try {
+      await api.authorizeEarlyClose(stop.id, reason)
+      await refresh()
+      await loadOperations()
+      notify(`${stop.id} 已取得运营提前关闭授权。`)
+    } catch (error) {
+      notify(error instanceof Error ? error.message : '提前关闭授权失败。', true)
+    } finally {
+      setBusyStop('')
     }
   }
 
@@ -76,6 +132,15 @@ export function DashboardPage({ summary, merchants, revision, refresh, notify, n
               <div><div className="small-note">批次 B001 · 取货线 R001</div><div className="console-time">{time(summary.batch.cutoff_at)} 截单　/　{time(summary.batch.depart_at)} 发车</div></div>
               <Button disabled={summary.batch.status !== 'open' || busy} onClick={() => void cutoff()}>确认本班截单</Button>
             </div>
+            <div className="banner-soft mt16">
+              <div className="responsive-row">
+                <div>
+                  <strong>Demo 后端业务时间：{clock ? dateTime(clock.current_at) : '读取中'}</strong>
+                  <div className="small-note">{clock?.simulated ? '正在使用模拟时钟；所有截止判断由后端执行。' : '当前跟随服务器真实时间。'}</div>
+                </div>
+                {clock?.simulated ? <Button kind="ghost" small disabled={Boolean(busyStop)} onClick={() => void resetClock()}>恢复真实时间</Button> : null}
+              </div>
+            </div>
             <div className="stage-track">{steps.map((_, index) => <span className={index <= stage ? 'done' : ''} key={index} />)}</div>
             <ul className="step-list">
               {steps.map(([title, text], index) => (
@@ -99,9 +164,10 @@ export function DashboardPage({ summary, merchants, revision, refresh, notify, n
             <div className="card-title"><h3>城区路线 R001</h3><Chip type="blue">固定顺序</Chip></div>
             {route?.stops.map((stop) => {
               const merchant = merchants.find((item) => item.id === stop.merchant_id)
-              return <div className="flow-row" key={stop.id}><span className="flow-order">{stop.sequence}</span><div className="flow-main"><strong>{merchant?.name}</strong><small>{merchant?.zone} · {time(stop.planned_pickup_at)} 预计取货</small></div><div className="flow-right"><strong>{stop.planned_count}袋</strong><small>{stop.handoff ? `实装${stop.handoff.actual_count}袋` : '未交接'}</small></div></div>
+              const pending = stop.unready_parcel_ids.length
+              return <div key={stop.id}><div className="flow-row"><span className="flow-order">{stop.sequence}</span><div className="flow-main"><strong>{merchant?.name}</strong><small>{merchant?.zone} · {time(stop.planned_pickup_at)} 预计到店 · {time(stop.latest_handoff_at)} 最晚交接</small></div><div className="flow-right"><strong>{stop.planned_count}袋</strong><small>{stop.handoff ? `实装${stop.handoff.actual_count}袋` : `制作中${pending}袋`}</small></div></div>{!stop.handoff && pending > 0 && !stop.deadline_reached ? <div className="actions"><Button kind="ghost" small disabled={Boolean(busyStop)} onClick={() => void simulateToDeadline(stop)}>模拟到达截止时间</Button>{!stop.early_close_authorized ? <Button kind="danger" small disabled={Boolean(busyStop) || !['cutoff', 'collecting'].includes(summary.batch.status)} onClick={() => void authorizeEarlyClose(stop)}>授权提前关闭交接</Button> : <Chip type="red">已授权提前关闭</Chip>}</div> : null}</div>
             })}
-            <div className="banner-warn mt16">取货顺序、路程及时间均为演示配置，尚未完成线下实测。</div>
+            <div className="banner-warn mt16">每站独立配置预计到店和最晚交接；末站最晚交接为 {route ? time(route.stops.at(-1)?.latest_handoff_at || summary.batch.depart_at) : '--:--'}，距计划发车保留装车缓冲。线路仍为演示配置，尚未完成线下实测。</div>
           </section>
           <section className="card">
             <div className="card-title"><h3>班次模拟贡献</h3><Chip>仅作测算</Chip></div>

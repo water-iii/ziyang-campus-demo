@@ -7,8 +7,26 @@ from sqlalchemy.orm import Session
 from . import services
 from .auth import DemoActor, get_demo_actor, require_merchant_scope, require_role
 from .database import get_db
-from .models import AuditLog, Issue, Merchant, Order, Parcel, PickupHandoff, PickupRoute, PickupStop, Product
-from .schemas import CostUpdateRequest, HandoffCreate, OrderCreate, ResolveIssueRequest
+from .models import (
+    AuditLog,
+    Issue,
+    Merchant,
+    Order,
+    Parcel,
+    PickupEarlyCloseAuthorization,
+    PickupHandoff,
+    PickupRoute,
+    PickupStop,
+    Product,
+)
+from .schemas import (
+    CostUpdateRequest,
+    DemoClockSetRequest,
+    EarlyCloseAuthorizationCreate,
+    HandoffCreate,
+    OrderCreate,
+    ResolveIssueRequest,
+)
 from .seed import seed_demo_data
 
 
@@ -52,6 +70,34 @@ def reset_demo(
     require_role(actor, "operations")
     result = seed_demo_data(db, reset=True)
     return {**result, "message": "已恢复固定演示种子。", "demo_only": True}
+
+
+@router.get("/demo/clock")
+def get_demo_clock(
+    db: Session = Depends(get_db),
+    actor: DemoActor = Depends(get_demo_actor),
+) -> dict:
+    require_role(actor, "operations")
+    return services.demo_clock_status(db)
+
+
+@router.put("/demo/clock")
+def put_demo_clock(
+    payload: DemoClockSetRequest,
+    db: Session = Depends(get_db),
+    actor: DemoActor = Depends(get_demo_actor),
+) -> dict:
+    require_role(actor, "operations")
+    return services.set_demo_clock(db, payload.current_at, actor)
+
+
+@router.delete("/demo/clock")
+def delete_demo_clock(
+    db: Session = Depends(get_db),
+    actor: DemoActor = Depends(get_demo_actor),
+) -> dict:
+    require_role(actor, "operations")
+    return services.reset_demo_clock(db, actor)
 
 
 @router.get("/batches/{batch_id}/summary")
@@ -220,9 +266,21 @@ def get_route(
     route = db.scalar(select(PickupRoute).where(PickupRoute.batch_id == batch_id))
     if route is None:
         services.require(False, "班次取货线路不存在。", 404)
+    batch = services.get_batch(db, batch_id)
     stops = db.scalars(
         select(PickupStop).where(PickupStop.route_id == route.id).order_by(PickupStop.sequence)
     ).all()
+    for stop in stops:
+        services.validate_stop_timing(stop, batch)
+    business_time = services.business_now(db)
+    authorizations = {
+        item.stop_id: item
+        for item in db.scalars(
+            select(PickupEarlyCloseAuthorization).where(
+                PickupEarlyCloseAuthorization.stop_id.in_([stop.id for stop in stops])
+            )
+        ).all()
+    }
     handoffs = {
         item.stop_id: item
         for item in db.scalars(select(PickupHandoff).where(PickupHandoff.stop_id.in_([stop.id for stop in stops]))).all()
@@ -239,17 +297,39 @@ def get_route(
         "id": route.id,
         "batch_id": batch_id,
         "name": route.name,
+        "business_time": business_time.isoformat(),
         "stops": [
             {
                 "id": stop.id,
                 "merchant_id": stop.merchant_id,
                 "sequence": stop.sequence,
                 "planned_pickup_at": stop.planned_pickup_at.isoformat(),
+                "latest_handoff_at": stop.latest_handoff_at.isoformat(),
+                "latest_pickup_at": stop.latest_handoff_at.isoformat(),
+                "deadline_reached": business_time >= stop.latest_handoff_at,
+                "timeout_handoff_allowed": business_time >= stop.latest_handoff_at,
+                "early_close_authorized": stop.id in authorizations,
+                "early_close_reason": authorizations[stop.id].reason if stop.id in authorizations else None,
+                "partial_handoff_allowed": (
+                    business_time >= stop.latest_handoff_at or stop.id in authorizations
+                ),
                 "planned_count": len(parcel_rows[stop.id]),
                 "ready_parcel_ids": [parcel.id for parcel in parcel_rows[stop.id] if parcel.status == "ready"],
+                "unready_parcel_ids": [parcel.id for parcel in parcel_rows[stop.id] if parcel.status == "pending"],
                 "parcel_status_counts": {
                     status: sum(1 for parcel in parcel_rows[stop.id] if parcel.status == status)
-                    for status in ("pending", "ready", "picked", "missing", "refunded", "delivered")
+                    for status in (
+                        "pending",
+                        "ready",
+                        "picked",
+                        "campus",
+                        "out",
+                        "missing",
+                        "pickup_timeout",
+                        "pickup_abandoned",
+                        "refunded",
+                        "delivered",
+                    )
                 },
                 "parcel_manifest": [
                     {"parcel_id": parcel.id, "order_id": parcel.order_id, "status": parcel.status}
@@ -282,6 +362,23 @@ def post_handoff(
         idempotency_key,
         f"pickup.handoff:{stop_id}",
         lambda: services.pickup_handoff(db, stop_id, payload, actor),
+    )
+
+
+@router.post("/pickup-stops/{stop_id}/early-close-authorization")
+def post_early_close_authorization(
+    stop_id: str,
+    payload: EarlyCloseAuthorizationCreate,
+    db: Session = Depends(get_db),
+    actor: DemoActor = Depends(get_demo_actor),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict:
+    require_role(actor, "operations")
+    return mutation(
+        db,
+        idempotency_key,
+        f"pickup.early_close_authorize:{stop_id}",
+        lambda: services.authorize_pickup_early_close(db, stop_id, payload.reason, actor),
     )
 
 

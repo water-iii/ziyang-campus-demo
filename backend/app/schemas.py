@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -31,6 +33,14 @@ class HandoffCreate(BaseModel):
             if set(self.picked_parcel_ids) & set(self.missing_parcel_ids):
                 raise ValueError("同一餐袋不能同时标记为实装和缺袋。")
         return self
+
+
+class EarlyCloseAuthorizationCreate(BaseModel):
+    reason: str = Field(min_length=2, max_length=240)
+
+
+class DemoClockSetRequest(BaseModel):
+    current_at: datetime
 
 
 class ResolveIssueRequest(BaseModel):

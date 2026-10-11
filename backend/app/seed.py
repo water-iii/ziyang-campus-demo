@@ -11,6 +11,7 @@ from .models import (
     AuditLog,
     Batch,
     CostRecord,
+    DemoClock,
     DeliveryPoint,
     Merchant,
     Order,
@@ -24,9 +25,9 @@ from .models import (
 
 
 MERCHANTS = [
-    ("m1", "梅西·米饭研究所", "梅西商圈", "演示地址 A（待实测）", "11:05"),
-    ("m2", "梅西·香酥鸡厨房", "梅西商圈", "演示地址 B（待实测）", "11:15"),
-    ("m3", "达高·川味小馆", "达高商圈", "演示地址 C（待实测）", "11:25"),
+    ("m1", "梅西·米饭研究所", "梅西商圈", "演示地址 A（待实测）", "11:05", "11:10"),
+    ("m2", "梅西·香酥鸡厨房", "梅西商圈", "演示地址 B（待实测）", "11:15", "11:20"),
+    ("m3", "达高·川味小馆", "达高商圈", "演示地址 C（待实测）", "11:25", "11:25"),
 ]
 
 PRODUCTS = [
@@ -44,6 +45,9 @@ PRODUCTS = [
 
 def seed_demo_data(db: Session, *, reset: bool = False) -> dict[str, int | str]:
     if not reset and db.scalar(select(func.count()).select_from(Batch)):
+        if db.get(DemoClock, "default") is None:
+            db.add(DemoClock(id="default"))
+            db.flush()
         return seed_counts(db)
 
     if reset:
@@ -51,6 +55,7 @@ def seed_demo_data(db: Session, *, reset: bool = False) -> dict[str, int | str]:
             db.execute(delete(table))
         db.flush()
 
+    db.add(DemoClock(id="default"))
     school = School(id="school-zy", name="资阳环境科技职业学院", authorization_status="unverified")
     db.add(school)
     db.flush()
@@ -63,7 +68,7 @@ def seed_demo_data(db: Session, *, reset: bool = False) -> dict[str, int | str]:
     db.add_all(
         [
             Merchant(id=mid, name=name, zone=zone, address=address, capacity=60, status="demo")
-            for mid, name, zone, address, _time in MERCHANTS
+            for mid, name, zone, address, _planned_time, _latest_time in MERCHANTS
         ]
     )
     db.flush()
@@ -90,8 +95,9 @@ def seed_demo_data(db: Session, *, reset: bool = False) -> dict[str, int | str]:
     route = PickupRoute(id="R001", batch_id=batch.id, name="梅西—达高城区取货线")
     db.add(route)
     db.flush()
-    for sequence, (mid, _name, _zone, _address, pickup_time) in enumerate(MERCHANTS, start=1):
+    for sequence, (mid, _name, _zone, _address, pickup_time, latest_time) in enumerate(MERCHANTS, start=1):
         hour, minute = (int(part) for part in pickup_time.split(":"))
+        latest_hour, latest_minute = (int(part) for part in latest_time.split(":"))
         db.add(
             PickupStop(
                 id=f"S{sequence:03d}",
@@ -99,6 +105,7 @@ def seed_demo_data(db: Session, *, reset: bool = False) -> dict[str, int | str]:
                 merchant_id=mid,
                 sequence=sequence,
                 planned_pickup_at=demo_day.replace(hour=hour, minute=minute),
+                latest_handoff_at=demo_day.replace(hour=latest_hour, minute=latest_minute),
             )
         )
     db.flush()
@@ -125,7 +132,12 @@ def seed_demo_data(db: Session, *, reset: bool = False) -> dict[str, int | str]:
             mock_paid=True,
         )
         order.items.append(
-            OrderItem(product_id=product[0], quantity=bag_count, unit_price=Decimal(product[3]))
+            OrderItem(
+                product_id=product[0],
+                product_name=product[2],
+                quantity=bag_count,
+                unit_price=Decimal(product[3]),
+            )
         )
         for parcel_number in range(1, bag_count + 1):
             order.parcels.append(

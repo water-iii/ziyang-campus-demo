@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from math import ceil
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
@@ -15,6 +16,7 @@ from .models import (
     AuditLog,
     Batch,
     CostRecord,
+    DemoClock,
     DeliveryPoint,
     DeliveryTask,
     DeliveryTaskParcel,
@@ -26,6 +28,7 @@ from .models import (
     Parcel,
     PickupHandoff,
     PickupHandoffParcel,
+    PickupEarlyCloseAuthorization,
     PickupRoute,
     PickupStop,
     Product,
@@ -35,10 +38,38 @@ from .schemas import HandoffCreate, OrderCreate
 
 BATCH_STATUSES = ("open", "cutoff", "collecting", "transit", "campus", "delivering", "finished")
 PARCEL_PROGRESS = {"pending": 0, "ready": 1, "picked": 2, "campus": 3, "out": 4, "delivered": 5}
+DEPARTURE_LOADING_BUFFER_MINUTES = 5
 
 
 def now() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def normalized_time(value: datetime) -> datetime:
+    if value.tzinfo is not None:
+        return value.astimezone(UTC).replace(tzinfo=None)
+    return value
+
+
+def demo_time_control_enabled(db: Session) -> bool:
+    return db.info.get("app_env") in {"demo", "test"}
+
+
+def require_demo_time_control(db: Session) -> None:
+    require(demo_time_control_enabled(db), "当前运行环境未启用演示时间控制。", 404)
+
+
+def business_now(db: Session) -> datetime:
+    if demo_time_control_enabled(db):
+        clock = db.get(DemoClock, "default")
+        if clock is not None and clock.frozen_at is not None:
+            return clock.frozen_at
+    return now()
+
+
+def unique_id(prefix: str) -> str:
+    """生成不依赖“最大编号 + 1”的并发安全公开标识。"""
+    return f"{prefix}{uuid4().hex[:24]}"
 
 
 def require(condition: bool, message: str, status_code: int = 409) -> None:
@@ -75,6 +106,70 @@ def audit(
     )
 
 
+def demo_clock_status(db: Session) -> dict[str, Any]:
+    require_demo_time_control(db)
+    clock = db.get(DemoClock, "default")
+    current = business_now(db)
+    return {
+        "environment": db.info.get("app_env"),
+        "current_at": current.isoformat(),
+        "frozen_at": clock.frozen_at.isoformat() if clock and clock.frozen_at else None,
+        "simulated": bool(clock and clock.frozen_at),
+    }
+
+
+def set_demo_clock(db: Session, current_at: datetime, actor: DemoActor) -> dict[str, Any]:
+    require_demo_time_control(db)
+    frozen_at = normalized_time(current_at)
+    clock = db.get(DemoClock, "default")
+    if clock is None:
+        clock = DemoClock(id="default")
+        db.add(clock)
+    clock.frozen_at = frozen_at
+    clock.updated_by = actor.actor_id
+    audit(
+        db,
+        actor,
+        "demo.clock.set",
+        "demo_clock",
+        clock.id,
+        batch_id=None,
+        details={"current_at": frozen_at.isoformat(), "environment": db.info.get("app_env")},
+    )
+    return {
+        "environment": db.info.get("app_env"),
+        "current_at": frozen_at.isoformat(),
+        "frozen_at": frozen_at.isoformat(),
+        "simulated": True,
+    }
+
+
+def reset_demo_clock(db: Session, actor: DemoActor) -> dict[str, Any]:
+    require_demo_time_control(db)
+    clock = db.get(DemoClock, "default")
+    if clock is None:
+        clock = DemoClock(id="default")
+        db.add(clock)
+    clock.frozen_at = None
+    clock.updated_by = actor.actor_id
+    audit(
+        db,
+        actor,
+        "demo.clock.reset",
+        "demo_clock",
+        clock.id,
+        batch_id=None,
+        details={"environment": db.info.get("app_env")},
+    )
+    current = now()
+    return {
+        "environment": db.info.get("app_env"),
+        "current_at": current.isoformat(),
+        "frozen_at": None,
+        "simulated": False,
+    }
+
+
 def execute_idempotent(
     db: Session,
     key: str | None,
@@ -96,7 +191,7 @@ def execute_idempotent(
 
 def order_status(order: Order, batch_status: str) -> str:
     parcel_states = [parcel.status for parcel in order.parcels]
-    if any(state == "missing" for state in parcel_states):
+    if any(state in {"missing", "pickup_timeout", "pickup_abandoned"} for state in parcel_states):
         return "pickup_exception"
     if parcel_states and all(state == "refunded" for state in parcel_states):
         return "refunded"
@@ -135,7 +230,7 @@ def serialize_order(order: Order, batch_status: str) -> dict[str, Any]:
         "items": [
             {
                 "product_id": item.product_id,
-                "name": item.product.name,
+                "name": item.product_name,
                 "quantity": item.quantity,
                 "unit_price": float(item.unit_price),
             }
@@ -150,7 +245,7 @@ def list_orders(db: Session, batch_id: str, merchant_id: str | None = None) -> l
     query = (
         select(Order)
         .where(Order.batch_id == batch_id)
-        .options(selectinload(Order.items).selectinload(OrderItem.product), selectinload(Order.parcels))
+        .options(selectinload(Order.items), selectinload(Order.parcels))
         .order_by(Order.id)
     )
     if merchant_id:
@@ -162,7 +257,7 @@ def get_order_detail(db: Session, order_id: str) -> dict[str, Any]:
     order = db.scalar(
         select(Order)
         .where(Order.id == order_id)
-        .options(selectinload(Order.items).selectinload(OrderItem.product), selectinload(Order.parcels))
+        .options(selectinload(Order.items), selectinload(Order.parcels))
     )
     require(order is not None, "订单不存在。", 404)
     batch = get_batch(db, order.batch_id)
@@ -194,9 +289,7 @@ def create_order(db: Session, payload: OrderCreate, actor: DemoActor) -> dict[st
         422,
     )
 
-    existing_ids = db.scalars(select(Order.id).where(Order.id.like("O%"))).all()
-    numeric_ids = [int(value[1:]) for value in existing_ids if value[1:].isdigit()]
-    order_id = f"O{max(numeric_ids, default=260800) + 1}"
+    order_id = unique_id("O")
     amount = sum((products[item.product_id].price * item.quantity for item in payload.items), Decimal("0"))
     order = Order(
         id=order_id,
@@ -211,6 +304,7 @@ def create_order(db: Session, payload: OrderCreate, actor: DemoActor) -> dict[st
         order.items.append(
             OrderItem(
                 product_id=item.product_id,
+                product_name=products[item.product_id].name,
                 quantity=item.quantity,
                 unit_price=products[item.product_id].price,
             )
@@ -234,7 +328,7 @@ def create_order(db: Session, payload: OrderCreate, actor: DemoActor) -> dict[st
     refreshed = db.scalar(
         select(Order)
         .where(Order.id == order.id)
-        .options(selectinload(Order.items).selectinload(OrderItem.product), selectinload(Order.parcels))
+        .options(selectinload(Order.items), selectinload(Order.parcels))
     )
     return {"order": serialize_order(refreshed, batch.status)}
 
@@ -355,6 +449,92 @@ def pack_parcel(db: Session, parcel_id: str, actor: DemoActor) -> dict[str, Any]
     }
 
 
+def validate_stop_timing(stop: PickupStop, batch: Batch) -> None:
+    require(stop.planned_pickup_at <= stop.latest_handoff_at, "站点最晚交接时间不能早于预计到店时间。")
+    latest_departure_safe_time = batch.depart_at - timedelta(minutes=DEPARTURE_LOADING_BUFFER_MINUTES)
+    require(
+        stop.latest_handoff_at <= latest_departure_safe_time,
+        f"站点最晚交接时间必须至少早于计划发车 {DEPARTURE_LOADING_BUFFER_MINUTES} 分钟。",
+    )
+
+
+def authorize_pickup_early_close(
+    db: Session,
+    stop_id: str,
+    reason: str,
+    actor: DemoActor,
+) -> dict[str, Any]:
+    stop = db.scalar(
+        select(PickupStop)
+        .where(PickupStop.id == stop_id)
+        .options(
+            selectinload(PickupStop.handoff),
+            selectinload(PickupStop.early_close_authorization),
+            selectinload(PickupStop.route),
+        )
+    )
+    require(stop is not None, "取货站点不存在。", 404)
+    batch = get_batch(db, stop.route.batch_id)
+    validate_stop_timing(stop, batch)
+    require(batch.status in {"cutoff", "collecting"}, "当前班次不能授权提前关闭交接。")
+    require(stop.handoff is None, "该站点已经完成交接，无需提前关闭授权。")
+    require(stop.early_close_authorization is None, "该站点已经取得提前关闭授权。")
+    current_time = business_now(db)
+    require(current_time < stop.latest_handoff_at, "已到站点最晚交接时间，无需提前关闭授权。")
+
+    parcels = db.scalars(
+        select(Parcel)
+        .join(Order)
+        .where(Order.batch_id == batch.id, Parcel.merchant_id == stop.merchant_id)
+        .options(selectinload(Parcel.order))
+    ).all()
+    require(bool(parcels), "商家没有餐袋。", 404)
+    require(
+        all(parcel.order.accepted_at is not None for parcel in parcels),
+        "商家仍有未接单订单，不能授权司机绕过接单校验。",
+    )
+    pending_ids = sorted(parcel.id for parcel in parcels if parcel.status == "pending")
+    require(bool(pending_ids), "该站点没有制作中的餐袋，无需提前关闭授权。")
+    require(
+        all(parcel.status in {"pending", "ready"} for parcel in parcels),
+        "该站点餐袋已进入其他履约状态，不能授权提前关闭。",
+    )
+
+    authorization = PickupEarlyCloseAuthorization(
+        id=unique_id("EA"),
+        stop_id=stop.id,
+        authorized_by=actor.actor_id,
+        reason=reason,
+        business_time=current_time,
+    )
+    db.add(authorization)
+    audit(
+        db,
+        actor,
+        "pickup.early_close_authorize",
+        "pickup_stop",
+        stop.id,
+        batch_id=batch.id,
+        details={
+            "authorization_id": authorization.id,
+            "merchant_id": stop.merchant_id,
+            "reason": reason,
+            "pending_parcel_ids": pending_ids,
+            "business_time": current_time.isoformat(),
+            "latest_handoff_at": stop.latest_handoff_at.isoformat(),
+        },
+    )
+    return {
+        "authorization_id": authorization.id,
+        "stop_id": stop.id,
+        "merchant_id": stop.merchant_id,
+        "reason": reason,
+        "pending_parcel_ids": pending_ids,
+        "business_time": current_time.isoformat(),
+        "latest_handoff_at": stop.latest_handoff_at.isoformat(),
+    }
+
+
 def pickup_handoff(
     db: Session,
     stop_id: str,
@@ -364,10 +544,15 @@ def pickup_handoff(
     stop = db.scalar(
         select(PickupStop)
         .where(PickupStop.id == stop_id)
-        .options(selectinload(PickupStop.handoff), selectinload(PickupStop.route).selectinload(PickupRoute.stops))
+        .options(
+            selectinload(PickupStop.handoff),
+            selectinload(PickupStop.early_close_authorization),
+            selectinload(PickupStop.route).selectinload(PickupRoute.stops),
+        )
     )
     require(stop is not None, "取货站点不存在。", 404)
     batch = get_batch(db, stop.route.batch_id)
+    validate_stop_timing(stop, batch)
     require(batch.status in {"cutoff", "collecting"}, "当前班次不允许取货。")
     require(stop.handoff is None, "该站点已确认过交接，不能重复交接。")
 
@@ -380,11 +565,31 @@ def pickup_handoff(
         select(Parcel)
         .join(Order)
         .where(Order.batch_id == batch.id, Parcel.merchant_id == stop.merchant_id)
+        .options(selectinload(Parcel.order))
         .order_by(Parcel.id)
     ).all()
     require(bool(parcels), "商家没有餐袋。", 404)
-    require(all(parcel.status == "ready" for parcel in parcels), "该商家存在未打包餐袋，请先完成出餐。")
+    require(
+        all(parcel.order.accepted_at is not None for parcel in parcels),
+        "该商家仍有未接单订单，司机不能绕过接单校验。",
+    )
+    require(
+        all(parcel.status in {"pending", "ready"} for parcel in parcels),
+        "该商家餐袋已进入其他履约状态，不能再次交接。",
+    )
     planned_count = len(parcels)
+    unready_ids = {parcel.id for parcel in parcels if parcel.status == "pending"}
+    current_time = business_now(db)
+    deadline_reached = current_time >= stop.latest_handoff_at
+    early_close_authorization = stop.early_close_authorization
+    if unready_ids:
+        require(
+            deadline_reached or early_close_authorization is not None,
+            (
+                f"该商家存在未打包餐袋；站点最晚交接时间 {stop.latest_handoff_at.isoformat()} 前，"
+                "必须取得运营提前关闭授权。"
+            ),
+        )
     require(payload.actual_count <= planned_count, "实际餐袋数不能超过本次计划数。", 422)
     parcel_by_id = {parcel.id: parcel for parcel in parcels}
     missing_ids = set(payload.missing_parcel_ids)
@@ -395,28 +600,66 @@ def pickup_handoff(
         picked_ids = set(payload.picked_parcel_ids)
         require(picked_ids.issubset(parcel_by_id), "实装餐袋编号不属于当前商家或当前班次。", 422)
         require(picked_ids | missing_ids == set(parcel_by_id), "必须逐袋明确实装或缺袋结果。", 422)
+    require(
+        all(parcel_by_id[parcel_id].status == "ready" for parcel_id in picked_ids),
+        "只有已接单且已打包的餐袋可以确认实装。",
+    )
     require(len(picked_ids) == payload.actual_count, "实际数量必须与实装餐袋编号数量一致。", 422)
     shortage_count = planned_count - payload.actual_count
     require(len(missing_ids) == shortage_count, "缺袋编号数量必须等于计划数与实际数之差。", 422)
 
+    timeout_ids: set[str] = set()
+    abandoned_ids: set[str] = set()
+    shortage_ids: set[str] = set()
+    handoff_outcomes: dict[str, str] = {}
     for parcel in parcels:
         if parcel.id in missing_ids:
-            parcel.status = "missing"
-            next_number = int(db.scalar(select(func.count()).select_from(Issue).where(Issue.batch_id == batch.id)) or 0) + 1
+            if parcel.status == "pending":
+                if deadline_reached:
+                    parcel.status = "pickup_timeout"
+                    issue_type = "merchant_preparation_timeout"
+                    outcome = "pickup_timeout"
+                    timeout_ids.add(parcel.id)
+                else:
+                    parcel.status = "pickup_abandoned"
+                    issue_type = "merchant_preparation_early_close"
+                    outcome = "pickup_abandoned"
+                    abandoned_ids.add(parcel.id)
+            else:
+                parcel.status = "missing"
+                issue_type = "merchant_handoff_shortage"
+                outcome = "missing"
+                shortage_ids.add(parcel.id)
+            issue_id = unique_id("EX")
             db.add(
                 Issue(
-                    id=f"EX{next_number:03d}",
+                    id=issue_id,
                     batch_id=batch.id,
                     merchant_id=stop.merchant_id,
                     order_id=parcel.order_id,
                     parcel_id=parcel.id,
-                    type="merchant_handoff_shortage",
+                    type=issue_type,
                     status="open",
                 )
             )
-            db.flush()
+            audit(
+                db,
+                actor,
+                "issue.open",
+                "issue",
+                issue_id,
+                batch_id=batch.id,
+                details={
+                    "merchant_id": stop.merchant_id,
+                    "parcel_id": parcel.id,
+                    "order_id": parcel.order_id,
+                    "type": issue_type,
+                },
+            )
+            handoff_outcomes[parcel.id] = outcome
         elif parcel.id in picked_ids:
             parcel.status = "picked"
+            handoff_outcomes[parcel.id] = "picked"
 
     handoff = PickupHandoff(
         stop_id=stop.id,
@@ -431,7 +674,7 @@ def pickup_handoff(
             PickupHandoffParcel(
                 handoff_id=handoff.id,
                 parcel_id=parcel.id,
-                outcome="missing" if parcel.id in missing_ids else "picked",
+                outcome=handoff_outcomes[parcel.id],
             )
         )
     batch.status = "collecting"
@@ -448,6 +691,15 @@ def pickup_handoff(
             "actual_count": payload.actual_count,
             "picked_parcel_ids": sorted(picked_ids),
             "missing_parcel_ids": sorted(missing_ids),
+            "shortage_parcel_ids": sorted(shortage_ids),
+            "timeout_parcel_ids": sorted(timeout_ids),
+            "abandoned_parcel_ids": sorted(abandoned_ids),
+            "business_time": current_time.isoformat(),
+            "latest_handoff_at": stop.latest_handoff_at.isoformat(),
+            "deadline_reached": deadline_reached,
+            "early_close_authorization_id": (
+                early_close_authorization.id if early_close_authorization and not deadline_reached else None
+            ),
         },
     )
     return {
@@ -458,6 +710,15 @@ def pickup_handoff(
         "actual_count": payload.actual_count,
         "picked_parcel_ids": sorted(picked_ids),
         "missing_parcel_ids": sorted(missing_ids),
+        "shortage_parcel_ids": sorted(shortage_ids),
+        "timeout_parcel_ids": sorted(timeout_ids),
+        "abandoned_parcel_ids": sorted(abandoned_ids),
+        "business_time": current_time.isoformat(),
+        "latest_handoff_at": stop.latest_handoff_at.isoformat(),
+        "deadline_reached": deadline_reached,
+        "early_close_authorization_id": (
+            early_close_authorization.id if early_close_authorization and not deadline_reached else None
+        ),
     }
 
 
@@ -686,7 +947,10 @@ def resolve_issue(db: Session, issue_id: str, resolution: str, actor: DemoActor)
     require(issue is not None, "异常不存在。", 404)
     require(issue.status == "open", "异常已经处理，不能重复模拟退款。")
     parcel = db.get(Parcel, issue.parcel_id)
-    require(parcel is not None and parcel.status == "missing", "此异常没有可退款的未装车餐袋。")
+    require(
+        parcel is not None and parcel.status in {"missing", "pickup_timeout", "pickup_abandoned"},
+        "此异常没有可处理的未装车餐袋。",
+    )
     parcel.status = "refunded"
     issue.status = "resolved"
     issue.resolution = resolution
@@ -750,7 +1014,16 @@ def batch_summary(db: Session, batch_id: str) -> dict[str, Any]:
     variable = costs.get("variable_per_order", Decimal("0")) * len(orders)
     fixed = costs.get("fixed_per_batch", Decimal("0"))
     status_counts = {status: sum(1 for parcel in parcels if parcel.status == status) for status in (
-        "pending", "ready", "picked", "campus", "out", "delivered", "missing", "refunded"
+        "pending",
+        "ready",
+        "picked",
+        "campus",
+        "out",
+        "delivered",
+        "missing",
+        "pickup_timeout",
+        "pickup_abandoned",
+        "refunded",
     )}
     return {
         "batch": {

@@ -100,6 +100,7 @@ class OrderItem(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     order_id: Mapped[str] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True)
     product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), nullable=False)
+    product_name: Mapped[str] = mapped_column(String(120), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False)
     unit_price: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
 
@@ -142,9 +143,28 @@ class PickupStop(Base):
     merchant_id: Mapped[str] = mapped_column(ForeignKey("merchants.id"), nullable=False)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     planned_pickup_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    latest_handoff_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
     route: Mapped[PickupRoute] = relationship(back_populates="stops")
     handoff: Mapped[PickupHandoff | None] = relationship(back_populates="stop", uselist=False)
+    early_close_authorization: Mapped[PickupEarlyCloseAuthorization | None] = relationship(
+        back_populates="stop", uselist=False
+    )
+
+
+class PickupEarlyCloseAuthorization(Base):
+    __tablename__ = "pickup_early_close_authorizations"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    stop_id: Mapped[str] = mapped_column(
+        ForeignKey("pickup_stops.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    authorized_by: Mapped[str] = mapped_column(String(80), nullable=False)
+    reason: Mapped[str] = mapped_column(String(240), nullable=False)
+    business_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+    stop: Mapped[PickupStop] = relationship(back_populates="early_close_authorization")
 
 
 class PickupHandoff(Base):
@@ -243,6 +263,15 @@ class AuditLog(Base):
     entity_id: Mapped[str] = mapped_column(String(40), nullable=False)
     details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class DemoClock(Base):
+    __tablename__ = "demo_clocks"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    frozen_at: Mapped[datetime | None] = mapped_column(DateTime)
+    updated_by: Mapped[str | None] = mapped_column(String(80))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
 class IdempotencyRecord(Base):

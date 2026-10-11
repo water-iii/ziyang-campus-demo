@@ -19,7 +19,15 @@ def default_database_url() -> str:
     return f"sqlite:///{(data_dir / 'demo.db').as_posix()}"
 
 
-def create_app(database_url: str | None = None, *, seed: bool = True) -> FastAPI:
+def create_app(
+    database_url: str | None = None,
+    *,
+    seed: bool = True,
+    app_env: str | None = None,
+) -> FastAPI:
+    environment = (app_env or os.getenv("APP_ENV") or "demo").strip().lower()
+    if environment not in {"demo", "test", "staging", "production"}:
+        raise ValueError(f"不支持的 APP_ENV：{environment}")
     app = FastAPI(
         title="午点通 · 资阳校园集运 Demo API",
         version="0.1.0",
@@ -37,8 +45,9 @@ def create_app(database_url: str | None = None, *, seed: bool = True) -> FastAPI
 
     url = database_url or os.getenv("DATABASE_URL") or default_database_url()
     engine = build_engine(url)
+    app.state.app_env = environment
     app.state.engine = engine
-    app.state.session_factory = build_session_factory(engine)
+    app.state.session_factory = build_session_factory(engine, environment)
     Base.metadata.create_all(engine)
     if seed:
         with app.state.session_factory.begin() as db:

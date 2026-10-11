@@ -4,6 +4,12 @@ import { Button, Chip, Empty, PageHeading, dateTime, money } from '../components
 import type { PageProps } from '../App'
 import type { AuditLog, Issue } from '../types'
 
+function issueTitle(type: string): string {
+  if (type === 'merchant_preparation_timeout') return '商家出餐超时未装车'
+  if (type === 'merchant_preparation_early_close') return '运营提前关闭时放弃未完成餐品'
+  return '商家交接缺袋'
+}
+
 export function IssuesPage({ summary, merchants, revision, refresh, notify }: PageProps) {
   const [issues, setIssues] = useState<Issue[]>([])
   const [logs, setLogs] = useState<AuditLog[]>([])
@@ -60,7 +66,7 @@ export function IssuesPage({ summary, merchants, revision, refresh, notify }: Pa
         <div>
           <section className="card">
             <div className="card-title"><h3>履约异常处理</h3><Chip type={openCount ? 'red' : 'green'}>{openCount} 项待处理</Chip></div>
-            {issues.length ? issues.map((issue) => <div className="issue" key={issue.id}><div className="two-between"><strong>{issue.id} · 商家交接缺袋</strong><Chip type={issue.status === 'open' ? 'red' : 'green'}>{issue.status === 'open' ? '待处理' : '已结案'}</Chip></div><p>商家：{merchants.find((item) => item.id === issue.merchant_id)?.name}　订单：{issue.order_id}　餐袋：{issue.parcel_id}</p><p>记录时间：{dateTime(issue.created_at)}</p>{issue.status === 'open' ? <Button kind="danger" small disabled={busy === issue.id} onClick={() => void resolve(issue.id)}>标记为模拟退款并结案</Button> : <div className="banner-soft">处理结论：{issue.resolution} · {issue.resolved_at ? dateTime(issue.resolved_at) : ''}</div>}</div>) : <Empty title="目前没有异常" text="可在司机端第三站选择“模拟缺1袋并交接”。" />}
+            {issues.length ? issues.map((issue) => <div className="issue" key={issue.id}><div className="two-between"><strong>{issue.id} · {issueTitle(issue.type)}</strong><Chip type={issue.status === 'open' ? 'red' : 'green'}>{issue.status === 'open' ? '待处理' : '已结案'}</Chip></div><p>商家：{merchants.find((item) => item.id === issue.merchant_id)?.name}　订单：{issue.order_id}　餐袋：{issue.parcel_id}</p><p>记录时间：{dateTime(issue.created_at)}</p>{issue.status === 'open' ? <Button kind="danger" small disabled={busy === issue.id} onClick={() => void resolve(issue.id)}>标记为模拟退款并结案</Button> : <div className="banner-soft">处理结论：{issue.resolution} · {issue.resolved_at ? dateTime(issue.resolved_at) : ''}</div>}</div>) : <Empty title="目前没有异常" text="可在司机端演示已打包缺袋，或在最晚取货后登记未完成出餐。" />}
             <div className="banner-pink mt16">此处只有模拟退款状态，不会转账、扣费或影响真实消费者。</div>
           </section>
           <section className="card"><div className="card-title"><h3>业务审计记录</h3><small>最新操作优先</small></div><ul className="log-list">{logs.map((log) => <li key={log.id}><span className="log-time">{dateTime(log.created_at)}</span><span className="log-msg"><strong>{log.action}</strong> · {log.actor_role}/{log.actor_id} · {log.entity_id}</span></li>)}</ul></section>

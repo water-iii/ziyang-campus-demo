@@ -2,6 +2,7 @@ import type {
   AuditLog,
   BatchSummary,
   DeliveryTask,
+  DemoClock,
   Issue,
   Merchant,
   MerchantDashboard,
@@ -82,6 +83,17 @@ export const api = {
   getSummary: () => request<BatchSummary>('/batches/B001/summary'),
   getMerchants: () => request<Merchant[]>('/merchants'),
   reset: () => request<{ orders: number; parcels: number; merchants: number }>('/demo/reset', { method: 'POST' }),
+  getDemoClock: () => request<DemoClock>('/demo/clock'),
+  setDemoClock: (currentAt: string) =>
+    request<DemoClock>(
+      '/demo/clock',
+      {
+        method: 'PUT',
+        body: JSON.stringify({ current_at: currentAt }),
+      },
+      'operations',
+    ),
+  resetDemoClock: () => request<DemoClock>('/demo/clock', { method: 'DELETE' }, 'operations'),
   createOrder: (payload: {
     merchant_id: string
     delivery_point_id: string
@@ -112,6 +124,8 @@ export const api = {
       picked_parcel_ids: pickedParcelIds,
       missing_parcel_ids: missingParcelIds,
     }),
+  authorizeEarlyClose: (stopId: string, reason: string) =>
+    post<MutationResult>(`/pickup-stops/${stopId}/early-close-authorization`, 'operations', { reason }),
   depart: () => post<MutationResult>('/batches/B001/depart', 'driver'),
   campusReceive: () => post<MutationResult>('/batches/B001/campus-receive', 'campus'),
   assignDelivery: () => post<MutationResult>('/batches/B001/delivery/assign', 'campus'),

@@ -74,6 +74,8 @@ export interface BatchSummary {
     out: number
     delivered: number
     missing: number
+    pickup_timeout: number
+    pickup_abandoned: number
     refunded: number
   }
   economics: {
@@ -98,8 +100,16 @@ export interface RouteStop {
   merchant_id: string
   sequence: number
   planned_pickup_at: string
+  latest_handoff_at: string
+  latest_pickup_at: string
+  deadline_reached: boolean
+  timeout_handoff_allowed: boolean
+  early_close_authorized: boolean
+  early_close_reason: string | null
+  partial_handoff_allowed: boolean
   planned_count: number
   ready_parcel_ids: string[]
+  unready_parcel_ids: string[]
   parcel_status_counts: Record<string, number>
   parcel_manifest: Array<{ parcel_id: string; order_id: string; status: string }>
   handoff: null | {
@@ -128,7 +138,15 @@ export interface PickupRoute {
   id: string
   batch_id: string
   name: string
+  business_time: string
   stops: RouteStop[]
+}
+
+export interface DemoClock {
+  environment: string
+  current_at: string
+  frozen_at: string | null
+  simulated: boolean
 }
 
 export interface Issue {

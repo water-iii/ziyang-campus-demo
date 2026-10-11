@@ -36,7 +36,7 @@ Set-Location .\backend
 Set-Location ..
 ```
 
-当前迁移版本为 `0002_parcel_traceability`。已有 Stage 1 数据库也应执行上述命令，以增加逐袋交接和逐袋配送追踪表。
+当前迁移版本为 `0004_pickup_deadlines_clock`。已有数据库应执行上述命令；迁移会保留既有数据，回填历史订单商品名称快照，为每个取货站点增加最晚交接时间，并创建 Demo 时钟与提前关闭授权表。
 
 ## 启动 Stage 2 React 前端
 
@@ -69,6 +69,21 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8001/api/demo/reset' -Head
 
 响应中的 `orders=30`、`parcels=34`、`merchants=3` 表示重置成功。
 
+## Demo 业务时钟
+
+运营总览可以把后端业务时间推进到某站最晚交接时间，也可使用 API：
+
+```powershell
+$headers = @{ 'X-Demo-Role' = 'operations'; 'X-Demo-Actor' = 'local-demo' }
+$body = @{ current_at = '2026-10-10T11:25:00' } | ConvertTo-Json
+Invoke-RestMethod -Method Put -Uri 'http://127.0.0.1:8001/api/demo/clock' -Headers $headers -ContentType 'application/json' -Body $body
+
+# 恢复服务器真实时间
+Invoke-RestMethod -Method Delete -Uri 'http://127.0.0.1:8001/api/demo/clock' -Headers $headers
+```
+
+时间判断始终由后端执行。仅 `APP_ENV=demo` 或 `test` 允许使用这些接口；`staging` 和 `production` 返回 404。
+
 ## 自动化测试
 
 在项目根目录运行：
@@ -92,3 +107,5 @@ node .\test_ui.cjs
 | 运营 | `operations` | 截单、异常处理、审计、重置 |
 
 所有写接口都具备后端状态校验；可发送 `Idempotency-Key` 获得同一操作的安全重放。即使不发送幂等键，重复交接、重复发车和重复模拟退款也会被状态机拒绝。
+
+Stage 4.5 为每站分别配置预计到店与最晚交接时间，并确保末站最晚交接早于发车、留出装车缓冲。截止前司机可以提前核对已打包餐袋，但要放弃制作中餐袋必须取得运营授权；截止后未完成餐袋进入 `pickup_timeout`。未装车餐袋不会进入运输链路。订单 ID 使用 UUID 型唯一标识，订单商品名称、成交单价和金额均按下单时快照保存。

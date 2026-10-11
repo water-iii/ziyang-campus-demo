@@ -27,6 +27,8 @@ def test_alembic_builds_schema_from_empty_database(workspace_test_dir, monkeypat
         "pickup_stops",
         "pickup_handoffs",
         "pickup_handoff_parcels",
+        "pickup_early_close_authorizations",
+        "demo_clocks",
         "delivery_task_parcels",
         "issues",
         "audit_logs",
@@ -34,6 +36,10 @@ def test_alembic_builds_schema_from_empty_database(workspace_test_dir, monkeypat
         "alembic_version",
     }.issubset(tables)
     with engine.connect() as connection:
-        assert connection.execute(text("select version_num from alembic_version")).scalar_one() == "0002_parcel_traceability"
+        assert connection.execute(text("select version_num from alembic_version")).scalar_one() == "0004_pickup_deadlines_clock"
         assert connection.execute(text("select count(*) from orders")).scalar_one() == 0
+    order_item_columns = {column["name"]: column for column in inspect(engine).get_columns("order_items")}
+    assert order_item_columns["product_name"]["nullable"] is False
+    pickup_stop_columns = {column["name"]: column for column in inspect(engine).get_columns("pickup_stops")}
+    assert pickup_stop_columns["latest_handoff_at"]["nullable"] is False
     engine.dispose()
